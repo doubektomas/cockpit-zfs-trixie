@@ -1,0 +1,176 @@
+name: Build Debian packages
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-debs
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+
+    steps:
+      - name: Install base tooling
+        run: |
+          echo "deb http://deb.debian.org/debian trixie-backports main contrib non-free non-free-firmware" > /etc/apt/sources.list.d/debian-backports.list
+
+          if [ -f /etc/apt/sources.list.d/debian.sources ]; then
+            sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources
+          else
+            sed -i 's/ trixie main$/ trixie main contrib/' /etc/apt/sources.list
+          fi
+
+          apt update
+          apt install -y git jq
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check latest upstream tag
+        id: check_tag
+        run: |
+          UPSTREAM_TAG=$(git ls-remote --tags --refs https://github.com/45Drives/cockpit-zfs.git \
+          | awk -F'/' '{print $3}' \
+          | sort -V \
+          | tail -n1)
+
+          if [ -z "$UPSTREAM_TAG" ]; then
+            echo "Failed to determine upstream tag" >&2
+            exit 1
+          fi
+
+          if git ls-remote --tags --refs https://github.com/${{ github.repository }}.git \
+            | grep -q "refs/tags/${UPSTREAM_TAG}$"; then
+              echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+              echo "should_build=true" >> $GITHUB_OUTPUT
+              echo "upstream_tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Clone python libzfs source
+        if: steps.check_tag.outputs.should_build == 'true'
+        run: |
+          git clone https://github.com/asomers/py-libzfs.git /tmp/py-libzfs
+
+      - name: Build py-libzfs debs
+        if: steps.check_tag.outputs.should_build == 'true'
+        working-directory: /tmp/py-libzfs
+        run: |
+          apt install -y -t trixie-backports build-essential debhelper dh-python cython3 python3-all-dev python3-setuptools libzfslinux-dev
+
+          dpkg-buildpackage -B --no-sign -jauto
+          mkdir /tmp/out
+          mv /tmp/python3-libzfs_*.deb /tmp/out/
+          mv /tmp/python3-libzfs-dbgsym_*.deb /tmp/out/
+
+      - name: Install py-libzfs debs
+        if: steps.check_tag.outputs.should_build == 'true'
+        run: |
+          apt install -y /tmp/out/python3-libzfs_*.deb
+          apt install -y /tmp/out/python3-libzfs-dbgsym_*.deb
+          python3 -c "import libzfs; print('libzfs ok')"
+
+      - name: Clone cockpit-zfs source
+        if: steps.check_tag.outputs.should_build == 'true'
+        run: |
+          git clone --recurse-submodules \
+            --branch "${{ steps.check_tag.outputs.upstream_tag }}" \
+            --depth 1 \
+            https://github.com/45Drives/cockpit-zfs.git /tmp/cockpit-zfs
+
+      - name: Build cockpit-zfs
+        if: steps.check_tag.outputs.should_build == 'true'
+        working-directory: /tmp/cockpit-zfs
+        env:
+          YARN_ENABLE_IMMUTABLE_INSTALLS: "false"
+        run: |
+          apt install -y nodejs npm moreutils
+          npm install --global yarn
+          make
+
+      - name: Build cockpit-zfs deb
+        if: steps.check_tag.outputs.should_build == 'true'
+        working-directory: /tmp/cockpit-zfs
+        run: |
+          rm -rf /tmp/pkg-cockpit-zfs
+          mkdir -p /tmp/pkg-cockpit-zfs/DEBIAN
+          mkdir -p /tmp/pkg-cockpit-zfs/usr/share/cockpit/zfs
+
+          cp -a zfs/dist/. /tmp/pkg-cockpit-zfs/usr/share/cockpit/zfs/
+          cp -a system_files/. /tmp/pkg-cockpit-zfs/
+
+          VERSION=$(jq -r '.version' ./manifest.json)
+
+          #Sourced based on a deb package from https://repo.45drives.com/enterprise/debian/pool/main/c/cockpit-zfs/.
+          # The depenedency cockpit-alerts has been removed, as it doesn't seem to be available ever since version 1.2.18
+          cat > /tmp/pkg-cockpit-zfs/DEBIAN/control <<EOF
+          Package: cockpit-zfs
+          Version: $VERSION-trixie
+          Architecture: all
+          Maintainer: Jordan Keough <jkeough@45drives.com>
+          Depends: cockpit, python3, python3-libzfs, python3-pip, sqlite3, jq, msmtp, python3-dateutil
+          Section: utils
+          Priority: optional
+          Homepage: https://github.com/45Drives/cockpit-zfs-45d
+          Description: zfs manager for cockpit
+          EOF
+
+          #Sourced from: https://github.com/45Drives/cockpit-zfs/blob/main/packaging/ubuntu-jammy/postinst
+          cat > /tmp/pkg-cockpit-zfs/DEBIAN/postinst <<'EOF'
+          #!/bin/bash
+          set -e
+          export DEBIAN_FRONTEND=noninteractive
+
+          echo "[INFO] Reloading systemd daemon..."
+          systemctl daemon-reexec
+          systemctl daemon-reload
+
+          echo "[INFO] Enabling services..."
+          # Fixed service name: added missing dash in "houston-zfs-storage-alert"
+          systemctl enable --now houston-zfs-storage-alert.timer || true
+          systemctl enable houston-zfs-storage-alert.service || true
+
+          echo "[INFO] Starting services..."
+          # Restarting services safely, allowing them to fail without aborting script
+          systemctl restart zed || true
+
+          echo "[SUCCESS] Services enabled, started, and system is ready."
+          EOF
+
+          chmod 755 /tmp/pkg-cockpit-zfs/DEBIAN/postinst
+
+          dpkg-deb --build /tmp/pkg-cockpit-zfs /tmp/out/cockpit-zfs-custom_${VERSION}_all.deb
+
+      - name: Upload deb packages
+        if: steps.check_tag.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-packages
+          path: /tmp/out/*.deb
+
+      - name: Create tag
+        if: steps.check_tag.outputs.should_build == 'true'
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          git tag ${{ steps.check_tag.outputs.upstream_tag }}
+
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} \
+          ${{ steps.check_tag.outputs.upstream_tag }}
+
+      - name: Create GitHub release
+        if: steps.check_tag.outputs.should_build == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.check_tag.outputs.upstream_tag }}
+          files: /tmp/out/*.deb
