@@ -1,6 +1,6 @@
 # Cockpit-ZFS packaged for Debian trixie
 
-This repo takes care of packaing the official zfs modoule from [45drives](https://github.com/45Drives/cockpit-zfs), while also packing the python library `python3-libzfs` from an amazing fork by [asomers](https://github.com/asomers/py-libzfs).
+This repo takes care of packaing the official zfs module from [45drives](https://github.com/45Drives/cockpit-zfs), while also packing the python library `python3-libzfs` from an amazing fork by [asomers](https://github.com/asomers/py-libzfs).
 
 ## Important note
 
@@ -10,7 +10,7 @@ The container uses trixie-backports to get the latest libzfs packages. As of tod
 
 1. Install ZFS based on the official debian [documentation](https://wiki.debian.org/ZFS#Installation) (make sure to enable backports)
 2. Install cockpit based on the official [documentation](https://cockpit-project.org/running#debian) (don't add backports again)
-3. Download all three deb files from the latest CI run
+3. Download all three deb files from the latest Release
 
 4. Install these files in the following order
 
