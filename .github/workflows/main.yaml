@@ -32,7 +32,7 @@ jobs:
           apt install -y git jq
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Check latest upstream tag
         id: check_tag
@@ -151,7 +151,7 @@ jobs:
 
       - name: Upload deb packages
         if: steps.check_tag.outputs.should_build == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: deb-packages
           path: /tmp/out/*.deb
@@ -170,7 +170,7 @@ jobs:
 
       - name: Create GitHub release
         if: steps.check_tag.outputs.should_build == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.check_tag.outputs.upstream_tag }}
           files: /tmp/out/*.deb
